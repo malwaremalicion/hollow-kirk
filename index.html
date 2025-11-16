@@ -3,385 +3,555 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Chirk Knight</title>
-
+<title>Chirk Knight — Fixed Build</title>
 <style>
-    body { margin: 0; overflow: hidden; background: black; }
-    canvas { display: block; }
-    #pauseMenu, #deathMenu {
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(0,0,0,0.8); color: white; font-family: sans-serif;
-        display: none; justify-content: center; align-items: center;
-        flex-direction: column; font-size: 32px;
-    }
-    button {
-        margin: 10px; padding: 10px 20px; font-size: 24px;
-    }
+  html,body{height:100%;margin:0;background:#000;overflow:hidden;font-family:Arial,sans-serif}
+  canvas{display:block;margin:0 auto;background:#000}
+  #ui { position: absolute; left:12px; top:12px; color:#fff; z-index:50; text-shadow:0 0 6px #000; }
+  #inventory { position:absolute; right:12px; top:12px; color:#fff; z-index:50; text-align:right }
+  #menuOverlay,#pauseOverlay,#deathOverlay{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; background:rgba(0,0,0,0.75); color:white; z-index:60; }
+  .hidden{ display:none; }
+  button{ font-size:18px; padding:10px 18px; margin:8px; cursor:pointer; }
+  #mapMini{ position:absolute; right:12px; bottom:12px; width:220px; height:140px; background:rgba(0,0,0,0.45); border-radius:8px; z-index:50; display:none; }
+  #hudBar{ background:rgba(0,0,0,0.35); padding:8px; border-radius:6px; display:inline-block }
 </style>
 </head>
-
 <body>
-<canvas id="game"></canvas>
+  <canvas id="gameCanvas" width="1200" height="700"></canvas>
 
-<div id="pauseMenu">
-    <div>Paused</div>
-    <button onclick="resumeGame()">Resume</button>
-    <button onclick="returnToMenu()">Return to Menu</button>
-</div>
+  <div id="menuOverlay">
+    <h1 style="margin:0 0 10px 0">CHIRK KNIGHT</h1>
+    <div style="margin-bottom:10px">Controls: Arrows = move/jump, Z = attack, X = dash, C = use</div>
+    <div>
+      <button onclick="startGame()">Start</button>
+      <button onclick="loadGame()">Continue</button>
+    </div>
+  </div>
 
-<div id="deathMenu">
-    <div>You Died</div>
-    <button onclick="restartGame()">Respawn</button>
-    <button onclick="returnToMenu()">Return to Menu</button>
-</div>
+  <div id="pauseOverlay" class="hidden">
+    <h2 style="margin:0 0 10px 0">PAUSED</h2>
+    <div>
+      <button onclick="resumeGame()">Resume</button>
+      <button onclick="saveGame()">Save</button>
+      <button onclick="returnToMenu()">Return to Menu</button>
+    </div>
+  </div>
+
+  <div id="deathOverlay" class="hidden">
+    <h2 style="margin:0 0 10px 0">YOU DIED</h2>
+    <div>
+      <button onclick="respawn()">Respawn</button>
+      <button onclick="returnToMenu()">Return to Menu</button>
+    </div>
+  </div>
+
+  <div id="ui">
+    <div id="hudBar">
+      <div id="hpText">HP: --</div>
+    </div>
+  </div>
+  <div id="inventory"></div>
+  <canvas id="mapMini"></canvas>
 
 <script>
-let canvas = document.getElementById("game");
-let ctx = canvas.getContext("2d");
-canvas.width = 1280;
-canvas.height = 720;
+// -------------------------
+// Assets & audio
+// -------------------------
+const ASSETS = {};
+function loadImg(name, src){ const i = new Image(); i.src = src; ASSETS[name]=i; }
+loadImg('bg','bg.png');
+loadImg('player','chirk.png');
+loadImg('playerAttack','chirka.png');
+loadImg('enemy','cheese.png');
+loadImg('boss','supercheese.png');
+loadImg('ground','g.png');
+loadImg('spike','stug.png');
+loadImg('ball','BALL.png');
 
-/* ---------------- ASSET LOADING ------------------ */
+const SFX = {
+  step: new Audio('step.mp3'),
+  enemyDeath: new Audio('owe.mp3'),
+  playerDeath: new Audio('ow.mp3')
+};
+const MUSIC = { bg: new Audio('bgm.mp3'), boss: new Audio('boss.mp3') };
+MUSIC.bg.loop = true; MUSIC.boss.loop = true;
 
-let assets = {
-    player: load("chirk.png"),
-    attack: load("chirka.png"),
-    enemy: load("cheese.png"),
-    boss: load("supercheese.png"),
-    ground: load("g.png"),
-    spike: load("stug.png"),
-    bg: load("bg.png"),
-    fireball: load("BALL.png"),
+// -------------------------
+// Canvas, state
+// -------------------------
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const mapCanvas = document.getElementById('mapMini');
+const mapCtx = mapCanvas.getContext('2d');
+
+let running = false;
+let paused = false;
+let isDead = false;
+let showMap = false;
+
+// Level dimensions
+const LEVEL = { w: 22000, h: 1300 };
+
+// Camera
+let camera = { x: 0, y: 0, w: canvas.width, h: canvas.height };
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()]=true; if(e.key==='Escape') togglePause(); if(e.key.toLowerCase()==='m') toggleMap(); });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()]=false; });
+
+// -------------------------
+// Player
+// -------------------------
+const player = {
+  x: 200, y: 900, w:48, h:64,
+  vx:0, vy:0,
+  speed:5, jumpPower:18,
+  onGround:false, doubleJump:true,
+  attacking:false, attackTimer:0,
+  dashReady:true,
+  hp:8, maxHp:8,
+  flash:0,
+  facing:1
 };
 
-let sfx = {
-    step: new Audio("step.mp3"),
-    enemyDeath: new Audio("owe.mp3"),
-    playerDeath: new Audio("ow.mp3"),
-};
-
-let music = {
-    bgm: new Audio("bgm.mp3"),
-    boss: new Audio("boss.mp3")
-};
-
-function load(src) { let i = new Image(); i.src = src; return i; }
-
-/* ---------------- GAME VARIABLES ------------------ */
-
-let keys = {};
-let player = {
-    x: 200, y: 200, w: 48, h: 48, vx: 0, vy: 0,
-    hp: 5, maxHp: 5, attacking: false, attackTimer: 0
-};
-
-let gravity = 0.4;
-let level = [];
+// -------------------------
+// Platforms, spikes, enemies, fireballs, collectibles
+// -------------------------
+let platforms = [];
 let spikes = [];
 let enemies = [];
 let fireballs = [];
 let collectibles = [];
-let boss = {
-    x: 5000, y: 200, w: 128, h: 128,
-    hp: 20,
-    active: false,
-    inFrame: false,
-    dead: false
-};
 
-let bossArena = { left: 4800, right: 5500 };
-let gamePaused = false;
-let dead = false;
-let cameraX = 0;
+// Boss & arena
+let boss = { x:18000, y:820, w:140, h:160, hp:60, active:false, dead:false, arena: {left:17800, right:18400} };
 
-/* ---------------- LEVEL GENERATION ------------------ */
+// Inventory
+const inventory = { 'The Ultimate Gas':0, 'Chirkbob':0, 'Cheese Stuck Novel':0, 'Prism Break':0 };
 
-function makePlatform(x, y, w) {
-    level.push({x, y, w, h: 40});
+// -------------------------
+// Utilities
+// -------------------------
+function rectOverlap(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+function clampCamera(){ if(camera.x<0) camera.x=0; if(camera.y<0) camera.y=0; if(camera.x+camera.w>LEVEL.w) camera.x = LEVEL.w - camera.w; if(camera.y+camera.h>LEVEL.h) camera.y = LEVEL.h - camera.h; }
+
+// -------------------------
+// Level builder (platforms lowered & reachable)
+// -------------------------
+function buildLevel(){
+  platforms = []; spikes=[]; enemies=[]; collectibles=[]; fireballs=[];
+  // ground
+  platforms.push({x:0,y:980,w:LEVEL.w,h:80});
+  // series of reachable platforms (lower)
+  for(let i=0;i<120;i++){
+    const x = 400 + i*160;
+    const y = 780 - (i%5)*60;
+    platforms.push({x,y,w:120,h:36});
+    if(i%7===0) spikes.push({x:x+64,y:y-48,w:48,h:48});
+  }
+  // extra upper platforms
+  for(let j=0;j<50;j++){
+    const x = 9000 + j*240;
+    const y = 620 - (j%4)*48;
+    platforms.push({x,y,w:150,h:36});
+  }
+  // enemies (reduced amount)
+  for(let k=0;k<30;k++){
+    const ex = 800 + k*360 + (Math.random()*40);
+    const ey = 720 - (k%5)*60;
+    const shooter = (k%2===0);
+    enemies.push({x:ex,y:ey,w:48,h:60,hp:2,patrol:{min:ex-100,max:ex+100,dir:Math.random()<0.5?-1:1,speed:1+Math.random()*0.6},shooter,aiSleep:false, shotTimer:Math.floor(Math.random()*120)});
+  }
+  // collectibles
+  collectibles.push({x:2000,y:720,w:36,h:36,type:'The Ultimate Gas',picked:false});
+  collectibles.push({x:3200,y:680,w:36,h:36,type:'Chirkbob',picked:false});
+  collectibles.push({x:4700,y:720,w:36,h:36,type:'Cheese Stuck Novel',picked:false});
+  collectibles.push({x:6500,y:620,w:36,h:36,type:'Prism Break',picked:false});
 }
 
-function makeSpike(x, y) {
-    spikes.push({x, y, w: 40, h: 40});
+// -------------------------
+// Fireball spawn aimed at player
+// -------------------------
+function spawnAimedFireball(sx, sy, speed=6, strong=false){
+  const dx = (player.x + player.w/2) - (sx);
+  const dy = (player.y + player.h/2) - (sy);
+  const dist = Math.hypot(dx,dy) || 1;
+  const vx = dx / dist * speed;
+  const vy = dy / dist * speed;
+  fireballs.push({x:sx, y:sy, vx, vy, w:22, h:22, strong: !!strong});
 }
 
-function makeEnemy(x, y, shooter = false) {
-    enemies.push({
-        x, y, w: 48, h: 48,
-        hp: 2,
-        shooter,
-        shootTimer: Math.random() * 120
-    });
+// -------------------------
+// Player damage & death
+// -------------------------
+function damagePlayer(amount=1){
+  if(player.flash>0) return;
+  player.hp -= amount;
+  if(player.hp < 0) player.hp = 0;
+  player.flash = 48;
+  player.vy = -8;
+  if(player.hp <= 0){
+    isDead = true;
+    showDeath();
+  }
 }
 
-function makeCollectible(x, y, name) {
-    collectibles.push({x, y, w: 32, h: 32, name, collected: false});
+// -------------------------
+// Collectible pickup
+// -------------------------
+function checkCollectibles(){
+  for(const c of collectibles){
+    if(c.picked) continue;
+    if(rectOverlap(player,c)){
+      c.picked = true;
+      inventory[c.type] = (inventory[c.type]||0) + 1;
+      // apply immediate effects
+      if(c.type === 'Cheese Stuck Novel'){ player.maxHp++; player.hp = Math.min(player.hp + 1, player.maxHp); }
+      if(c.type === 'Chirkbob'){ player.hp = Math.min(player.maxHp, player.hp + 2); }
+      // SFX
+      try{ SFX.enemyDeath.play(); }catch(e){}
+    }
+  }
 }
 
-/* ---------------- HUGE LEVEL ------------------ */
+// -------------------------
+// Enemy AI update (grounded, patrol, aggro, shooting aimed)
+// -------------------------
+function updateEnemies(){
+  for(let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    // simple aggro by distance
+    const dx = Math.abs(player.x - e.x);
+    const dy = Math.abs(player.y - e.y);
+    if(dx < 420 && dy < 220) e.aiSleep = false;
 
-function buildLevel() {
-    level = [];
-    spikes = [];
-    enemies = [];
-    collectibles = [];
-
-    // long flat level
-    for (let i = 0; i < 300; i++) {
-        makePlatform(i * 200, 600, 200);
+    // patrol when asleep or far
+    if(!e.aiSleep){
+      if(dx < 420){ // aggro: approach
+        const dir = (player.x > e.x ? 1 : -1);
+        e.x += dir * (1.2 + Math.random()*0.4);
+      } else {
+        e.x += e.patrol.dir * e.patrol.speed;
+        if(e.x < e.patrol.min || e.x > e.patrol.max) e.patrol.dir *= -1;
+      }
     }
 
-    makeSpike(800, 560);
-    makeSpike(1200, 560);
-
-    // enemies (no floating)
-    for (let i = 0; i < 15; i++) {
-        let shooter = (i % 2 === 0);
-        makeEnemy(800 + i * 350, 520, shooter);
+    // shooting: aim at player if shooter
+    if(e.shooter){
+      e.shotTimer++;
+      if(e.shotTimer > 100){
+        e.shotTimer = 0;
+        spawnAimedFireball(e.x + e.w/2, e.y + e.h/2, 6);
+      }
     }
 
-    // collectibles
-    makeCollectible(2000, 480, "ultimate gas");
-    makeCollectible(2600, 480, "chirkbob");
-    makeCollectible(3300, 480, "cheese stuck novel");
-    makeCollectible(3900, 480, "prism break");
+    // collision with player
+    if(rectOverlap(player, e)){
+      damagePlayer(1);
+    }
+
+    // dead cleanup
+    if(e.hp <= 0){ enemies.splice(i,1); try{ SFX.enemyDeath.play(); }catch(e){} }
+  }
 }
 
-/* ---------------- INPUT ------------------ */
-
-document.addEventListener("keydown", (e)=>{ 
-    keys[e.key] = true; 
-    if(e.key==="Escape") pauseGame(); 
-});
-document.addEventListener("keyup", (e)=> keys[e.key] = false);
-
-/* ---------------- PHYSICS ------------------ */
-
-function collides(a,b) {
-    return a.x < b.x+b.w && a.x+a.w > b.x &&
-           a.y < b.y+b.h && a.y+a.h > b.y;
+// -------------------------
+// Boss activation & arena lock
+// -------------------------
+let savedEnemiesForRespawn = []; // hold initial spawn to respawn after boss dies
+function maybeActivateBoss(){
+  if(boss.dead) return;
+  // check if boss is in camera frame
+  const bossScreenX = boss.x - camera.x;
+  if(bossScreenX > -200 && bossScreenX < canvas.width + 200 && !boss.active){
+    // activate: despawn other enemies, lock camera to arena & player
+    boss.active = true;
+    // save enemies for respawn after boss dies
+    savedEnemiesForRespawn = enemies.map(e => ({...e}));
+    enemies = []; // despawn
+    // lock camera to boss arena
+    camera.x = Math.max(0, boss.arena.left - (canvas.width/2 - 200));
+    clampCamera();
+  }
+  if(boss.active && !boss.dead){
+    // lock player inside arena
+    if(player.x < boss.arena.left) player.x = boss.arena.left;
+    if(player.x + player.w > boss.arena.right) player.x = boss.arena.right - player.w;
+    // boss simple AI: shoot bursts at player
+    boss.timer = (boss.timer||0) + 1;
+    if(boss.timer % 90 === 0){
+      for(let i=-1;i<=1;i++){
+        spawnAimedFireball(boss.x + boss.w/2, boss.y + boss.h/2 + i*12, 7);
+      }
+    }
+    // small movement to remain centered
+    if(Math.abs((player.x) - boss.x) > 60){
+      boss.x += (player.x > boss.x ? 1.5 : -1.5);
+    }
+  }
+  if(boss.dead && savedEnemiesForRespawn.length){
+    // respawn saved enemies
+    enemies = savedEnemiesForRespawn.map(e => ({...e}));
+    savedEnemiesForRespawn = [];
+    boss.dead = false; boss.active = false; // ensure boss is off
+  }
 }
 
-/* ---------------- FIREBALLS ------------------ */
+// -------------------------
+// Physics & Player update
+// -------------------------
+function playerUpdate(){
+  // horizontal input
+  if(keys['arrowleft']){ player.vx = -player.speed; player.facing = -1; }
+  else if(keys['arrowright']){ player.vx = player.speed; player.facing = 1; }
+  else player.vx = 0;
 
-function spawnFireball(e) {
-    fireballs.push({
-        x: e.x, y: e.y + 20,
-        vx: (player.x > e.x ? 5 : -5),
-        w: 24, h: 24
-    });
+  // jump (arrow up)
+  if(keys['arrowup']){
+    if(!player._wantJump){
+      if(player.onGround){ player.vy = -player.jumpPower; player.onGround = false; player.doubleJump = true; try{ SFX.step.play(); }catch(e){} }
+      else if(player.doubleJump){ player.vy = -player.jumpPower; player.doubleJump = false; }
+      player._wantJump = true;
+    }
+  } else player._wantJump = false;
+
+  // dash (x)
+  if(keys['x']){
+    if(!player._dashHeld && player.dashReady){ player._dashHeld = true; player.vx = (player.facing||1) * 14; player.dashReady = false; setTimeout(()=>{ player.dashReady = true; }, 700); }
+  } else player._dashHeld = false;
+
+  // attack (z)
+  if(keys['z']){
+    if(!player.attacking && !player._attackHeld){ player.attacking = true; player.attackTimer = 12; player._attackHeld = true; }
+  } else player._attackHeld = false;
+  if(player.attacking){ player.attackTimer--; if(player.attackTimer <=0) player.attacking=false; }
+
+  // use item (c) - simplified
+  if(keys['c']){
+    if(!player._useHeld){
+      player._useHeld = true;
+      if(inventory['Chirkbob'] > 0){ inventory['Chirkbob']--; player.hp = Math.min(player.maxHp, player.hp + 3); }
+      else if(inventory['The Ultimate Gas'] > 0){ inventory['The Ultimate Gas']--; gasAura.active = true; gasAura.ttl = 120; }
+      else if(inventory['Prism Break'] > 0){ inventory['Prism Break']--; spawnAimedFireball(player.x + player.facing*60, player.y + player.h/2, 10, true); }
+    }
+  } else player._useHeld = false;
+
+  // gravity
+  player.vy += 0.9;
+  player.x += player.vx;
+  player.y += player.vy;
+
+  // platform collisions (land on top)
+  player.onGround = false;
+  for(const p of platforms){
+    if(rectOverlap(player, p)){
+      // we only want to land when falling onto platform
+      const prevBottom = player.y - player.vy + player.h;
+      if(player.vy >= 0 && prevBottom <= p.y + 12){
+        player.y = p.y - player.h;
+        player.vy = 0;
+        player.onGround = true;
+        player.doubleJump = true;
+        player.dashReady = true;
+      } else {
+        // resolve sideways
+        if(player.x < p.x) player.x = p.x - player.w - 0.1; else player.x = p.x + p.w + 0.1;
+      }
+    }
+  }
+
+  // spikes
+  for(const s of spikes) if(rectOverlap(player,s)) damagePlayer(1);
+
+  // clamp world bounds
+  if(player.x < 0) player.x = 0; if(player.x + player.w > LEVEL.w) player.x = LEVEL.w - player.w;
+  if(player.y > LEVEL.h + 300) damagePlayer(999);
+
+  if(player.flash > 0) player.flash--;
 }
 
-/* ---------------- BOSS ACTIVATION ------------------ */
+// gas aura
+const gasAura = { active:false, ttl:0 };
 
-function checkBossActivation() {
-    if (boss.dead) return;
-
-    let onScreen = boss.x - cameraX < canvas.width && boss.x - cameraX > -200;
-
-    if (onScreen && !boss.active) {
-        boss.active = true;
-        music.bgm.pause();
-        music.boss.loop = true;
-        music.boss.play();
-
-        // despawn all enemies when boss starts
-        enemies = [];
+// -------------------------
+// Main update loop
+// -------------------------
+let lastT = 0;
+function update(dt){
+  if(paused || isDead) return;
+  playerUpdate();
+  updateEnemies();
+  // move fireballs
+  for(let i=fireballs.length-1;i>=0;i--){
+    const b = fireballs[i];
+    b.x += b.vx; b.y += b.vy;
+    // collisions: with player
+    if(rectOverlap(b, player)){
+      damagePlayer(b.strong ? 3 : 1); fireballs.splice(i,1); continue;
     }
-
-    if (boss.active) {
-        // lock movement inside arena
-        player.x = Math.max(player.x, bossArena.left);
-        player.x = Math.min(player.x, bossArena.right - player.w);
+    // with enemies
+    for(let j=enemies.length-1;j>=0;j--){
+      if(rectOverlap(b, enemies[j])){
+        if(b.strong) enemies.splice(j,1); else enemies[j].hp -= 1;
+        fireballs.splice(i,1); break;
+      }
     }
+    // with boss
+    if(b && boss.active && rectOverlap(b, boss)){ boss.hp -= (b.strong?6:2); fireballs.splice(i,1); continue; }
+    // bounds
+    if(b.x < -200 || b.x > LEVEL.w + 200 || b.y < -400 || b.y > LEVEL.h + 400) fireballs.splice(i,1);
+  }
+
+  // collectibles check
+  checkCollectibles();
+
+  // boss activation / logic
+  maybeActivateBoss();
+  if(boss.active && !boss.dead){
+    // boss simple firing handled in maybeActivateBoss()
+    if(boss.hp <= 0){
+      boss.dead = true;
+      // respawn saved enemies handled inside maybeActivateBoss
+      // play music swap
+      try{ MUSIC.boss.pause(); MUSIC.bg.play(); }catch(e){}
+    }
+  }
+
+  // gas aura ticks
+  if(gasAura.active){ gasAura.ttl--; if(gasAura.ttl <= 0) gasAura.active = false; else {
+    for(let i=enemies.length-1;i>=0;i--){
+      const e=enemies[i]; if(Math.abs(e.x - player.x) < 160 && Math.abs(e.y - player.y) < 80){ e.hp -= 1; if(e.hp <= 0) enemies.splice(i,1); }
+    }
+  } }
+
+  // camera follow
+  camera.x = player.x - canvas.width/2;
+  camera.y = player.y - canvas.height/2;
+  clampCamera();
 }
 
-/* ---------------- UPDATE ------------------ */
+// -------------------------
+// Draw
+// -------------------------
+function draw(){
+  // clear
+  ctx.fillStyle = '#071019'; ctx.fillRect(0,0,canvas.width,canvas.height);
 
-function update() {
-    if (gamePaused || dead) return;
+  // parallax bg
+  const bg = ASSETS.bg;
+  if(bg.complete){
+    const bx = -camera.x * 0.2 % bg.width;
+    for(let i=-1;i<6;i++) ctx.drawImage(bg, bx + i*bg.width, -100 - camera.y*0.08, bg.width, canvas.height + 200);
+  }
 
-    /* -------- Player movement ---------- */
-    if (keys["ArrowLeft"]) { player.vx = -4; }
-    else if (keys["ArrowRight"]) { player.vx = 4; }
-    else player.vx = 0;
+  // platforms (tiled)
+  const g = ASSETS.ground;
+  for(const p of platforms){
+    const tile = 64;
+    for(let tx=0; tx < p.w; tx+=tile) ctx.drawImage(g, p.x + tx - camera.x, p.y - camera.y, Math.min(tile,p.w-tx), p.h);
+  }
 
-    if (keys["ArrowUp"]) {
-        player.vy = -10;
-        sfx.step.play();
-    }
+  // spikes
+  for(const s of spikes) ctx.drawImage(ASSETS.spike, s.x - camera.x, s.y - camera.y, s.w, s.h);
 
-    player.vy += gravity;
-    player.x += player.vx;
-    player.y += player.vy;
+  // collectibles
+  for(const c of collectibles) if(!c.picked){ ctx.fillStyle='#f7df6b'; ctx.fillRect(c.x-camera.x, c.y-camera.y, c.w, c.h); ctx.fillStyle='#000'; ctx.font='11px Arial'; ctx.fillText(c.type?c.type.split(' ')[0]:'item', c.x-camera.x+2, c.y-camera.y+22); }
 
-    /* -------- Camera ---------- */
-    cameraX = player.x - canvas.width/2;
+  // enemies
+  for(const e of enemies){
+    ctx.drawImage(ASSETS.enemy, e.x - camera.x, e.y - camera.y, e.w, e.h);
+    // hp bar
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(e.x-camera.x, e.y-camera.y-6, e.w, 6);
+    ctx.fillStyle='lime'; ctx.fillRect(e.x-camera.x, e.y-camera.y-6, e.w * Math.max(0, e.hp/2), 6);
+  }
 
-    /* -------- Collisions ---------- */
-    for (let p of level) {
-        if (collides(player, p)) {
-            player.y = p.y - player.h;
-            player.vy = 0;
-        }
-    }
+  // boss (if alive)
+  if(!boss.dead){ ctx.drawImage(ASSETS.boss, boss.x - camera.x, boss.y - camera.y, boss.w, boss.h); }
 
-    for (let s of spikes) {
-        if (collides(player,s)) damagePlayer();
-    }
+  // fireballs
+  for(const b of fireballs) ctx.drawImage(ASSETS.ball, b.x - camera.x, b.y - camera.y, b.w, b.h);
 
-    /* -------- Enemy update ---------- */
-    for (let e of enemies) {
-        if (e.shooter) {
-            e.shootTimer--;
-            if (e.shootTimer <= 0) {
-                spawnFireball(e);
-                e.shootTimer = 120;
-            }
-        }
+  // player (attack sprite while attacking)
+  if(player.flash>0) ctx.globalAlpha = 0.6;
+  if(player.attacking) ctx.drawImage(ASSETS.playerAttack, player.x - camera.x, player.y - camera.y, player.w, player.h);
+  else ctx.drawImage(ASSETS.player, player.x - camera.x, player.y - camera.y, player.w, player.h);
+  ctx.globalAlpha = 1;
 
-        if (collides(player,e)) damagePlayer();
-    }
+  // gas aura
+  if(gasAura.active){
+    ctx.fillStyle='rgba(120,255,120,0.12)';
+    ctx.beginPath(); ctx.ellipse(player.x + player.w/2 - camera.x, player.y + player.h/2 - camera.y, 180, 80, 0, 0, Math.PI*2); ctx.fill();
+  }
 
-    /* -------- Fireballs ---------- */
-    for (let f of fireballs) {
-        f.x += f.vx;
-        if (collides(player, f)) damagePlayer();
-    }
+  // HUD
+  document.getElementById('hpText').textContent = `HP: ${player.hp}/${player.maxHp}`;
+  // inventory
+  const invEl = document.getElementById('inventory'); invEl.style.right='12px'; invEl.style.top='12px'; invEl.style.position='absolute'; invEl.style.color='#fff'; invEl.style.zIndex=50;
+  invEl.innerHTML = `<div style="text-shadow:0 0 6px #000"><b>Inventory</b><br>The Ultimate Gas: ${inventory['The Ultimate Gas']||0} | Chirkbob: ${inventory['Chirkbob']||0} | Prism Break: ${inventory['Prism Break']||0} | Novel: ${inventory['Cheese Stuck Novel']||0}</div>`;
 
-    /* -------- Boss ---------- */
-    if (!boss.dead) {
-        checkBossActivation();
-
-        if (boss.active) {
-            if (player.x < boss.x) boss.x -= 2;
-            else boss.x += 2;
-
-            if (collides(player, boss)) damagePlayer();
-        }
-    }
-
-    /* -------- Attacking ---------- */
-    if (keys["z"] && !player.attacking) {
-        player.attacking = true;
-        player.attackTimer = 12;
-    }
-
-    if (player.attacking) {
-        player.attackTimer--;
-        if (player.attackTimer <= 0) player.attacking = false;
-
-        let hitbox = {x: player.x + (player.vx>=0?40:-40), y: player.y, w:40, h:40};
-
-        for (let e of enemies) {
-            if (collides(hitbox,e)) {
-                e.hp--;
-                if (e.hp <= 0) {
-                    sfx.enemyDeath.play();
-                    enemies.splice(enemies.indexOf(e),1);
-                }
-            }
-        }
-
-        // boss damage
-        if (collides(hitbox, boss) && boss.active && !boss.dead) {
-            boss.hp--;
-            if (boss.hp <= 0) {
-                boss.dead = true;
-                music.boss.pause();
-                music.bgm.play();
-                buildLevel(); // respawn enemies
-            }
-        }
-    }
-
-    /* -------- Death ---------- */
-    if (player.hp <= 0) {
-        sfx.playerDeath.play();
-        dead = true;
-        document.getElementById("deathMenu").style.display = "flex";
-    }
+  // minimap
+  if(showMap){ drawMiniMap(); mapCanvas.style.display='block'; } else mapCanvas.style.display='none';
 }
 
-/* ---------------- DAMAGE ------------------ */
-
-function damagePlayer() {
-    if (!dead) {
-        player.hp--;
-        if (player.hp <= 0) {
-            dead = true;
-            document.getElementById("deathMenu").style.display = "flex";
-        }
-    }
+// minimap
+function drawMiniMap(){
+  mapCtx.clearRect(0,0,mapCanvas.width,mapCanvas.height);
+  mapCtx.fillStyle='rgba(12,12,20,0.9)'; mapCtx.fillRect(0,0,mapCanvas.width,mapCanvas.height);
+  const sx = mapCanvas.width / LEVEL.w, sy = mapCanvas.height / LEVEL.h;
+  // enemies
+  mapCtx.fillStyle='red'; for(const e of enemies) mapCtx.fillRect(e.x*sx, e.y*sy, 2,2);
+  // boss
+  mapCtx.fillStyle = boss.active ? 'purple' : 'rgba(128,0,128,0.6)'; mapCtx.fillRect(boss.x*sx, boss.y*sy,4,4);
+  // player
+  mapCtx.fillStyle='lime'; mapCtx.fillRect(player.x*sx, player.y*sy,3,3);
+  // camera rect
+  mapCtx.strokeStyle='rgba(255,255,255,0.3)'; mapCtx.strokeRect(camera.x*sx, camera.y*sy, canvas.width*sx, canvas.height*sy);
 }
 
-/* ---------------- DRAW ------------------ */
+// -------------------------
+// Pause / menu / death UI
+// -------------------------
+function togglePause(){ if(isDead) return; paused = !paused; document.getElementById('pauseOverlay').classList.toggle('hidden', !paused); if(paused){ try{ MUSIC.bg.pause(); }catch(e){} } else { try{ MUSIC.bg.play(); }catch(e){} } }
+function showDeath(){ document.getElementById('deathOverlay').classList.remove('hidden'); paused = true; try{ MUSIC.bg.pause(); MUSIC.boss.pause(); }catch(e){} }
+function respawn(){ document.getElementById('deathOverlay').classList.add('hidden'); isDead=false; paused=false; player.hp = player.maxHp; player.x=200; player.y=800; buildLevel(); try{ MUSIC.bg.play(); }catch(e){} }
+function returnToMenu(){ location.reload(); }
+function startGame(){ document.getElementById('menuOverlay').style.display='none'; paused=false; isDead=false; buildLevel(); try{ MUSIC.bg.play(); }catch(e){} last=tNow=performance.now(); running=true; requestAnimationFrame(loop); }
+function resumeGame(){ paused=false; document.getElementById('pauseOverlay').classList.add('hidden'); try{ MUSIC.bg.play(); }catch(e){} }
 
-function draw() {
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.drawImage(assets.bg, -cameraX*0.3, 0, canvas.width*2, canvas.height);
+// -------------------------
+// Save / load
+// -------------------------
+function saveGame(){ const data = { px:player.x, py:player.y, hp:player.hp, inv:inventory }; localStorage.setItem('chirk_save', JSON.stringify(data)); alert('Saved'); }
+function loadGame(){ const s = localStorage.getItem('chirk_save'); if(!s) return alert('No save'); const d = JSON.parse(s); player.x=d.px; player.y=d.py; player.hp=d.hp||player.hp; for(const k in d.inv) inventory[k]=d.inv[k]; alert('Loaded'); }
 
-    for (let p of level) ctx.drawImage(assets.ground, p.x - cameraX, p.y, p.w, p.h);
-    for (let s of spikes) ctx.drawImage(assets.spike, s.x - cameraX, s.y);
-    for (let c of collectibles) if (!c.collected) ctx.drawImage(assets.attack, c.x - cameraX, c.y, 32, 32);
-    for (let e of enemies) ctx.drawImage(assets.enemy, e.x - cameraX, e.y, e.w, e.h);
-
-    ctx.drawImage(assets.player, player.x - cameraX, player.y, player.w, player.h);
-
-    if (player.attacking)
-        ctx.drawImage(assets.attack, player.x - cameraX + (player.vx>=0?40:-40), player.y);
-
-    if (!boss.dead)
-        ctx.drawImage(assets.boss, boss.x - cameraX, boss.y, boss.w, boss.h);
-
-    for (let f of fireballs)
-        ctx.drawImage(assets.fireball, f.x - cameraX, f.y, 24, 24);
-}
-
-/* ---------------- GAME LOOP ------------------ */
-
-function loop() {
-    update();
+// -------------------------
+// Main loop
+// -------------------------
+let last = 0;
+function loop(ts){
+  if(!last) last = ts;
+  const dt = ts - last; last = ts;
+  if(!paused && !isDead){
+    update(dt);
     draw();
-    requestAnimationFrame(loop);
+  } else {
+    draw(); // still draw so UI persists
+  }
+  requestAnimationFrame(loop);
 }
 
-/* ---------------- MENU FUNCTIONS ------------------ */
-
-function pauseGame() {
-    if (dead) return;
-    gamePaused = true;
-    document.getElementById("pauseMenu").style.display = "flex";
-}
-
-function resumeGame() {
-    gamePaused = false;
-    document.getElementById("pauseMenu").style.display = "none";
-}
-
-function restartGame() {
-    dead = false;
-    document.getElementById("deathMenu").style.display = "none";
-    player.hp = player.maxHp;
-    player.x = 200;
-    player.y = 200;
-    buildLevel();
-}
-
-function returnToMenu() {
-    location.reload();
-}
-
-/* ---------------- START ------------------ */
-
+// -------------------------
+// start with menu visible
+// -------------------------
 buildLevel();
-music.bgm.loop = true;
-music.bgm.play();
-loop();
-
+mapCanvas.width = 220; mapCanvas.height = 140; mapCanvas.style.right='12px'; mapCanvas.style.bottom='12px';
 </script>
-
 </body>
 </html>
+
+</html>
+
 
 
 
