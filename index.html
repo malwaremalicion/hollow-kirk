@@ -1,0 +1,895 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Hollow Knight Style — Full</title>
+  <style>
+    html,body { margin:0; height:100%; background:#000; overflow:hidden; font-family:Arial, sans-serif; }
+    canvas { display:block; margin:0 auto; background:#000; }
+    #uiOverlay, #pauseOverlay, #menu, #mapCanvas {
+      position: absolute; z-index: 10; pointer-events: none;
+    }
+    #menu, #pauseOverlay {
+      inset:0; display:flex; align-items:center; justify-content:center; pointer-events:auto;
+      background: rgba(0,0,0,0.7); color:white; flex-direction:column;
+    }
+    button { font-size:20px; padding:10px 18px; margin-top:10px; cursor:pointer; }
+    #hud {
+      position: absolute; left:12px; top:10px; z-index:12; color:white; pointer-events:none;
+      text-shadow:0 0 6px #000;
+    }
+    #inventory {
+      position: absolute; right:12px; top:10px; z-index:12; color:white; pointer-events:none;
+      text-shadow:0 0 6px #000; text-align:right;
+    }
+    #mapCanvas {
+      right:12px; bottom:12px; width:200px; height:140px; pointer-events:auto; border-radius:6px;
+      background: rgba(0,0,0,0.5); padding:6px;
+    }
+    #pauseText { font-size:36px; margin-bottom:18px; }
+  </style>
+</head>
+<body>
+  <div id="menu">
+    <div style="font-size:36px; font-weight:bold;">HOLLOW KNIGHT STYLE</div>
+    <div style="margin-top:10px;">Controls: Arrow keys, Z = attack, X = dash, C = use</div>
+    <button onclick="startGame()">START</button>
+  </div>
+
+  <div id="pauseOverlay" style="display:none;">
+    <div id="pauseText">PAUSED</div>
+    <button onclick="togglePause()">Resume</button>
+    <button onclick="saveGame()">Save</button>
+    <button onclick="loadGame()">Load</button>
+  </div>
+
+  <canvas id="game" width="1200" height="700"></canvas>
+
+  <div id="hud">
+    <div id="hpText">HP: —</div>
+    <div id="mapToggleHint" style="font-size:12px; opacity:0.8;">Press M to toggle map</div>
+  </div>
+
+  <div id="inventory"></div>
+
+  <canvas id="mapCanvas" style="display:none;"></canvas>
+
+<script>
+/* ============================================================
+   Full Game — Boss AI, Collectibles, Pause, Map
+   Single-file HTML. Put assets in same folder.
+   ============================================================ */
+
+// Canvas & context
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Map mini-canvas
+const mapCanvas = document.getElementById('mapCanvas');
+const mapCtx = mapCanvas.getContext('2d');
+
+// UI
+const hudHp = document.getElementById('hpText');
+const inventoryDiv = document.getElementById('inventory');
+const menuDiv = document.getElementById('menu');
+const pauseOverlay = document.getElementById('pauseOverlay');
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// Assets (images + audio)
+const images = {};
+['chirk','chirka','cheese','supercheese','BALL','g','stug','bg'].forEach(name=>{
+  const img = new Image(); img.src = name + '.png'; images[name] = img;
+});
+
+const sfx = {
+  step: new Audio('step.mp3'),
+  enemyDeath: new Audio('owe.mp3'),
+  playerDeath: new Audio('ow.mp3'),
+};
+const music = {
+  bgm: new Audio('bgm.mp3'),
+  boss: new Audio('boss.mp3')
+};
+music.bgm.loop = true; music.boss.loop = true;
+
+// Level dimensions
+const LEVEL = { width: 30000, height: 2000 };
+
+// Camera
+let camera = { x:0, y:0, width: canvas.width, height: canvas.height };
+
+// Game state
+let running = false;
+let paused = false;
+let showMap = false;
+let lastFrame = 0;
+
+// Player
+const player = {
+  x: 200, y: 400, w: 48, h: 64,
+  vx: 0, vy: 0,
+  speed: 5, jumpPower: 16,
+  onGround: false,
+  attacking: false, attackTimer: 0,
+  hp: 8, maxHp: 8,
+  dashes: 1, doubleJump: true,
+  dead: false,
+  facing: 1, // 1 right, -1 left
+  flash: 0
+};
+
+// Platforms & spikes
+const platforms = [];
+const spikes = [];
+
+// enemies & fireballs
+let enemies = [];
+let fireballs = [];
+
+// Boss
+const boss = {
+  x: 22000, y: 500, w: 140, h: 180,
+  vx: 0, vy: 0,
+  hp: 60,
+  maxHp: 60,
+  state: 'idle', // 'idle', 'phase1', 'phase2', 'phase3', 'telegraph', 'dead'
+  timer: 0,
+  dir: -1,
+  active: false,
+  teleTimer: 0
+};
+
+// Collectibles
+const collectibles = []; // {x,y,type, picked}
+
+// Inventory / effects
+const inventory = {
+  'The Ultimate Gas': {count:0, desc:'Temporary attack boost'},
+  'Chirkbob': {count:0, desc:'Instant heal + small boost'},
+  'Cheese Stuck Novel': {count:0, desc:'Permanent max HP +1'},
+  'Prism Break': {count:0, desc:'One-time powerful projectile'}
+};
+
+// Helper — place platforms (x,y,width,height)
+function addPlatform(x,y,w,h){ platforms.push({x,y,w,h}); }
+function addSpike(x,y){ spikes.push({x,y,w:48,h:48}); }
+
+// Build a tall, varied level (massive)
+(function buildLevel(){
+  // ground floor
+  addPlatform(0, 1200, LEVEL.width, 100);
+
+  // scattered platforms up the level
+  for(let i=0;i<160;i++){
+    const x = 600 + i*170;
+    const y = 900 - (i%6)*80;
+    addPlatform(x,y,140,36);
+    if(i%5===0) addSpike(x+60, y-48);
+  }
+
+  // higher platforms
+  for(let i=0;i<80;i++){
+    const x = 2000 + i*280;
+    const y = 700 - (i%5)*70;
+    addPlatform(x,y,160,36);
+  }
+
+  // random spike fields
+  for(let i=0;i<40;i++){
+    addSpike(5000 + i*180, 1160);
+  }
+})();
+
+// Spawn enemies across level
+(function spawnEnemies(){
+  for(let i=0;i<160;i++){
+    const x = 800 + i*160 + (Math.random()*80);
+    const y = 900 - (i%6)*80 - 50;
+    const shoot = Math.random() < 0.45;
+    enemies.push({
+      x,y, w:48,h:60,
+      hp:2,
+      shoot,
+      shotTimer: Math.floor(Math.random()*120),
+      patrol: {min:x-120, max:x+120, dir: Math.random()<0.5?1:-1, speed: 1 + Math.random()*0.9},
+      asleep:false
+    });
+  }
+})();
+
+// Place collectibles
+(function placeCollectibles(){
+  const types = ['The Ultimate Gas','Chirkbob','Cheese Stuck Novel','Prism Break'];
+  const positions = [
+    1400, 2300, 4200, 8800, 13200, 16800, 19500, 20500, 21500
+  ];
+  // scatter one of each among positions
+  for(let t=0;t<types.length;t++){
+    const pos = positions[t*2] || positions[t];
+    collectibles.push({x: pos, y: 1100 - (t*120), type: types[t], picked:false});
+  }
+  // a few more random picks
+  collectibles.push({x: 10000, y: 850, type:'Chirkbob', picked:false});
+  collectibles.push({x: 14500, y: 540, type:'The Ultimate Gas', picked:false});
+})();
+
+// Boss zone: adjust a bit
+// When player x > 20000, boss becomes active
+
+// Save & load
+function saveGame(){
+  const state = {
+    px: player.x, py: player.y, hp: player.hp, maxHp: player.maxHp,
+    inv: inventory,
+  };
+  localStorage.setItem('hk_save', JSON.stringify(state));
+  alert('Game saved.');
+}
+function loadGame(){
+  const js = localStorage.getItem('hk_save');
+  if(!js) return alert('No save found');
+  const s = JSON.parse(js);
+  player.x = s.px; player.y = s.py; player.hp = s.hp; player.maxHp = s.maxHp;
+  for(const k in s.inv) if(inventory[k]) inventory[k].count = s.inv[k].count;
+  alert('Loaded save.');
+}
+
+// Pause
+function togglePause(){
+  paused = !paused;
+  pauseOverlay.style.display = paused ? 'flex' : 'none';
+  // music pause/resume
+  if(paused){ music.bgm.pause(); music.boss.pause(); }
+  else {
+    if(boss.active) music.boss.play(); else music.bgm.play();
+  }
+}
+
+// Map toggle
+function toggleMap(){
+  showMap = !showMap;
+  mapCanvas.style.display = showMap ? 'block' : 'none';
+  mapCanvas.style.pointerEvents = showMap ? 'auto' : 'none';
+}
+document.addEventListener('keydown', (e)=> {
+  if(e.key === 'Escape') togglePause();
+  if(e.key.toLowerCase() === 'm') toggleMap();
+});
+
+// Map click: center camera
+mapCanvas.addEventListener('click', (ev)=>{
+  if(!showMap) return;
+  const rect = mapCanvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+  // map coordinates scale
+  const sx = LEVEL.width / mapCanvas.width;
+  const sy = LEVEL.height / mapCanvas.height;
+  camera.x = mx * sx - canvas.width/2;
+  camera.y = my * sy - canvas.height/2;
+  clampCamera();
+});
+
+// Start game
+function startGame(){
+  menuDiv.style.display = 'none';
+  running = true;
+  music.bgm.play();
+  lastFrame = performance.now();
+  requestAnimationFrame(gameLoop);
+}
+
+/* ============================================================
+   Physics, collisions, & helpers
+   ============================================================ */
+
+function clampCamera(){
+  if(camera.x < 0) camera.x = 0;
+  if(camera.y < 0) camera.y = 0;
+  if(camera.x + canvas.width > LEVEL.width) camera.x = LEVEL.width - canvas.width;
+  if(camera.y + canvas.height > LEVEL.height) camera.y = LEVEL.height - canvas.height;
+}
+
+function rectOverlap(a,b){
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function worldToMap(px,py){
+  return { x: px / LEVEL.width * mapCanvas.width, y: py / LEVEL.height * mapCanvas.height };
+}
+
+/* ============================================================
+   Player movement & actions
+   ============================================================ */
+function handlePlayerInput(dt){
+  // Horizontal
+  if(keys['arrowleft']) { player.vx = -player.speed; player.facing = -1; }
+  else if(keys['arrowright']) { player.vx = player.speed; player.facing = 1; }
+  else {
+    player.vx = 0;
+  }
+
+  // Jump (ArrowUp)
+  if(keys['arrowup']){
+    // only trigger jump when pressed newly — approximate by flash flag
+    if(player.onGround){
+      if(!player._wantJump){ // only once per keydown
+        player.vy = -player.jumpPower;
+        player.onGround = false;
+        player.doubleJump = true;
+        sfx.step && sfx.step.play();
+      }
+      player._wantJump = true;
+    } else if(player.doubleJump && !player._wantJump){
+      player.vy = -player.jumpPower;
+      player.doubleJump = false;
+      player._wantJump = true;
+    }
+  } else {
+    player._wantJump = false;
+  }
+
+  // Dash X
+  if(keys['x']){
+    if(!player._dashPressed && player.dashes > 0){
+      player._dashPressed = true;
+      player.vx = (player.facing || 1) * 16;
+      player.dashes = 0;
+    }
+  } else {
+    player._dashPressed = false;
+  }
+
+  // Attack Z
+  if(keys['z']){
+    if(!player.attacking && !player._attackHeld){
+      player.attacking = true;
+      player.attackTimer = 16; // frames
+      player._attackHeld = true;
+    }
+  } else player._attackHeld = false;
+
+  if(player.attacking){
+    player.attackTimer--;
+    if(player.attackTimer <= 0) player.attacking = false;
+  }
+
+  // Use item C
+  if(keys['c'] && !player._useHeld){
+    player._useHeld = true;
+    // Prefer heals: Chirkbob acts as heal; Prism Break use spawns special projectile
+    if(inventory['Chirkbob'].count > 0){
+      inventory['Chirkbob'].count--;
+      player.hp = Math.min(player.maxHp, player.hp + 3);
+    } else if(inventory['The Ultimate Gas'].count > 0){
+      // temporary attack boost effect: spawn a short-lived gas aura that damages nearby enemies
+      inventory['The Ultimate Gas'].count--;
+      // Implement simple AoE tick for 2 seconds
+      startGasAura();
+    } else if(inventory['Prism Break'].count > 0){
+      inventory['Prism Break'].count--;
+      // spawn a massive projectile that flies forward and kills enemies
+      fireballs.push({x: player.x + player.facing*60, y: player.y+20, vx: player.facing*12, vy: 0, w: 32, h:32, strong:true});
+    } else {
+      // no item - maybe use cheese novel? it is permanent on pickup only
+    }
+  } else if(!keys['c']) player._useHeld = false;
+}
+
+/* temporary gas aura effect */
+let gasAura = {active:false, ttl:0};
+function startGasAura(){
+  gasAura.active = true; gasAura.ttl = 120;
+}
+
+/* ============================================================
+   Physics & collisions per frame
+   ============================================================ */
+function physicsStep(dt){
+  // apply gravity
+  player.vy += 0.9;
+  player.x += player.vx;
+  player.y += player.vy;
+
+  // simple world bounds
+  if(player.x < 0) player.x = 0;
+  if(player.x + player.w > LEVEL.width) player.x = LEVEL.width - player.w;
+  if(player.y > LEVEL.height + 200) { // fell out of world
+    damagePlayer(999);
+  }
+
+  // platform collisions (AABB)
+  player.onGround = false;
+  for(const p of platforms){
+    if(rectOverlap(player, p)){
+      // Only resolve if coming from above
+      const prevBottom = player.y - player.vy + player.h;
+      const pTop = p.y;
+      if(prevBottom <= pTop + 12 && player.vy >= 0){
+        player.y = p.y - player.h;
+        player.vy = 0;
+        player.onGround = true;
+        player.doubleJump = true;
+        player.dashes = 1;
+      } else {
+        // sideways collision: simple push
+        if(player.x < p.x) player.x = p.x - player.w;
+        else player.x = p.x + p.w;
+      }
+    }
+  }
+
+  // spike collisions
+  for(const s of spikes){
+    if(rectOverlap(player, s)){
+      damagePlayer(1);
+    }
+  }
+
+  // clamp camera to follow player (but map click can override camera)
+  camera.x = player.x - canvas.width/2;
+  camera.y = player.y - canvas.height/2;
+  clampCamera();
+}
+
+/* ============================================================
+   Enemies update: smarter (patrol, aggro, shooting)
+   ============================================================ */
+function updateEnemies(dt){
+  // Update each enemy
+  for(const e of enemies){
+    // aggro if player near
+    const distX = Math.abs((player.x + player.w/2) - (e.x + e.w/2));
+    const distY = Math.abs((player.y + player.h/2) - (e.y + e.h/2));
+    const inRange = distX < 500 && distY < 250;
+    if(inRange) e.asleep = false;
+
+    if(!e.asleep){
+      // If player in aggro range, move toward player slightly, else patrol
+      if(inRange){
+        const dir = player.x > e.x ? 1 : -1;
+        e.x += dir * (1 + (Math.random()*0.5));
+      } else {
+        e.x += e.patrol.dir * e.patrol.speed;
+        if(e.x < e.patrol.min || e.x > e.patrol.max) e.patrol.dir *= -1;
+      }
+    }
+
+    // Shooting if shootable and player is in front and in vertical range
+    if(e.shoot){
+      e.shotTimer++;
+      if(e.shotTimer >= 90){
+        e.shotTimer = 0;
+        // aim toward player's y with small lead
+        const aimDy = (player.y + player.h/2) - (e.y + e.h/2);
+        const dir = player.x > e.x ? 1 : -1;
+        const projVy = aimDy * 0.04;
+        fireballs.push({x:e.x + dir*20, y: e.y + 20, vx: dir * 6, vy: projVy, w:20, h:20});
+      }
+    }
+
+    // collision with player attack
+    if(player.attacking){
+      const atk = { x: player.x + (player.facing>0?player.w: -40), y: player.y, w:60, h:player.h };
+      if(rectOverlap(atk, e)){
+        if(!e._hitCooldown){
+          e.hp--;
+          e._hitCooldown = 18;
+          // knockback
+          e.x += (player.facing||1) * 24;
+          if(e.hp <= 0) sfx.enemyDeath.play();
+        }
+      }
+    }
+    if(e._hitCooldown) e._hitCooldown--;
+  }
+
+  // tidy dead enemies
+  enemies = enemies.filter(e => e.hp > 0);
+
+  // fireball movement & collisions
+  for(let i = fireballs.length-1; i>=0; i--){
+    const b = fireballs[i];
+    b.x += b.vx; b.y += b.vy;
+    // bounds
+    if(b.x < 0 || b.x > LEVEL.width || b.y < -200 || b.y > LEVEL.height+200){
+      fireballs.splice(i,1); continue;
+    }
+    // collision with player
+    if(rectOverlap(b, player)){
+      damagePlayer(1);
+      fireballs.splice(i,1); continue;
+    }
+    // collision with enemies
+    for(let j = enemies.length-1; j>=0; j--){
+      if(rectOverlap(b, enemies[j])){
+        // strong flag kills instantly
+        if(b.strong) enemies.splice(j,1);
+        else enemies[j].hp--;
+        fireballs.splice(i,1);
+        break;
+      }
+    }
+    // collision with boss (if active)
+    if(b && boss.active && rectOverlap(b, boss)){
+      boss.hp -= (b.strong?8:2);
+      fireballs.splice(i,1);
+    }
+  }
+
+  // gas aura damage tick
+  if(gasAura.active){
+    gasAura.ttl--;
+    // damage nearby enemies
+    for(let i = enemies.length-1; i>=0; i--){
+      const e = enemies[i];
+      const dx = Math.abs((e.x+e.w/2) - (player.x+player.w/2));
+      const dy = Math.abs((e.y+e.h/2) - (player.y+player.h/2));
+      if(dx < 160 && dy < 80){
+        e.hp -= 1;
+        if(e.hp <= 0) sfx.enemyDeath.play();
+      }
+    }
+    if(gasAura.ttl <= 0) gasAura.active = false;
+  }
+}
+
+/* ============================================================
+   Boss AI — phases & telegraphs
+   ============================================================ */
+function updateBoss(dt){
+  // activate boss when player reaches threshold
+  if(!boss.active && player.x > 20000){
+    boss.active = true;
+    boss.state = 'phase1';
+    music.bgm.pause(); music.boss.play();
+  }
+  if(!boss.active) return;
+  if(boss.hp <= 0){
+    boss.state = 'dead';
+    boss.active = false;
+    music.boss.pause(); music.bgm.play();
+    return;
+  }
+
+  boss.timer++;
+
+  // phase transitions
+  if(boss.hp < boss.maxHp * 0.6 && boss.state === 'phase1'){
+    boss.state = 'phase2';
+    boss.timer = 0;
+  }
+  if(boss.hp < boss.maxHp * 0.3 && boss.state === 'phase2'){
+    boss.state = 'phase3';
+    boss.timer = 0;
+  }
+
+  // general gravity
+  boss.vy += 0.9;
+  boss.y += boss.vy;
+  // boss floor collision (ground)
+  if(boss.y + boss.h > 1160){ boss.y = 1160 - boss.h; boss.vy = 0; }
+
+  // Behavior by state
+  if(boss.state === 'phase1'){
+    // slow approach and shoot
+    if(boss.timer % 90 === 0){
+      // telegraph
+      boss.teleTimer = 24;
+    }
+    if(boss.teleTimer > 0){
+      boss.teleTimer--;
+      if(boss.teleTimer === 0){
+        // fire aimed shots
+        for(let k=-1;k<=1;k++){
+          const aimDy = (player.y + player.h/2) - (boss.y + boss.h/2) + k*40;
+          const dir = player.x > boss.x ? 1 : -1;
+          const vy = aimDy * 0.03;
+          fireballs.push({x: boss.x + (dir*80), y: boss.y + 60, vx: dir*6, vy: vy, w:28, h:28});
+        }
+      }
+    }
+    // small movement: circle the player
+    if(Math.abs((player.x) - boss.x) > 200) boss.x += (player.x > boss.x ? 1.2 : -1.2);
+  } else if(boss.state === 'phase2'){
+    // dash-charges: telegraph then fast dash
+    if(boss.timer % 160 === 0){
+      boss.teleTimer = 30;
+      boss._dashDir = (player.x > boss.x ? 1 : -1);
+    }
+    if(boss.teleTimer > 0){
+      boss.teleTimer--;
+      // show telegraph visually in rendering
+    } else if(boss._dashDir){
+      // dash for a bit
+      boss.x += boss._dashDir * 18;
+      // small chance to jump mid-dash
+      if(boss.timer % 40 === 0){ boss.vy = -14; }
+    }
+    // occasionally shoot arcs
+    if(boss.timer % 120 === 0){
+      for(let i=-2;i<=2;i++){
+        const vy = i * 2;
+        const dir = (player.x > boss.x ? 1 : -1);
+        fireballs.push({x: boss.x + dir*60, y: boss.y + 40, vx: dir*7, vy: vy, w:28, h:28});
+      }
+    }
+  } else if(boss.state === 'phase3'){
+    // enraged: frequent big jumps and fast projectiles
+    if(boss.timer % 60 === 0){
+      boss.vy = -18;
+    }
+    if(boss.timer % 20 === 0){
+      // quick burst of bullets toward player
+      const dir = (player.x > boss.x ? 1 : -1);
+      for(let k=-2;k<=2;k++){
+        const vy = (player.y - boss.y)/20 + k*1.2;
+        fireballs.push({x: boss.x + dir*60, y: boss.y + 60, vx: dir*9, vy: vy, w:26, h:26});
+      }
+    }
+    // slight homing movement
+    boss.x += (player.x > boss.x ? 1.8 : -1.8);
+  }
+}
+
+/* ============================================================
+   Collectible pickup logic
+   ============================================================ */
+function checkCollectibles(){
+  for(const c of collectibles){
+    if(c.picked) continue;
+    const box = {x:c.x, y:c.y, w:40, h:40};
+    if(rectOverlap(player, box)){
+      c.picked = true;
+      inventory[c.type].count = (inventory[c.type].count || 0) + 1;
+      // effects on pickup (novel gives max HP)
+      if(c.type === 'Cheese Stuck Novel'){
+        player.maxHp = (player.maxHp || 8) + 1;
+        player.hp = Math.min(player.hp + 1, player.maxHp);
+      }
+      // Chirkbob minor heal
+      if(c.type === 'Chirkbob'){
+        player.hp = Math.min(player.maxHp, player.hp + 2);
+      }
+      // pick sound (enemyDeath as placeholder)
+      sfx.enemyDeath.play();
+    }
+  }
+}
+
+/* ============================================================
+   Damage to player
+   ============================================================ */
+function damagePlayer(amount=1){
+  if(player.flash > 0) return; // invuln frames
+  player.hp -= amount;
+  player.flash = 48;
+  player.vy = -8;
+  if(player.hp <= 0){
+    player.dead = true;
+    music.bgm.pause(); music.boss.pause();
+    sfx.playerDeath.play();
+    // show death overlay after slight delay
+    setTimeout(()=>{ document.getElementById('pauseOverlay').style.display = 'flex'; document.getElementById('pauseText').textContent='YOU DIED'; paused = true; }, 500);
+  }
+}
+
+/* ============================================================
+   Main game loop
+   ============================================================ */
+function gameLoop(ts){
+  if(paused) { lastFrame = ts; return requestAnimationFrame(gameLoop); }
+  const dt = Math.min(40, ts - lastFrame); lastFrame = ts;
+
+  // update
+  handlePlayerInput(dt);
+  physicsStep(dt);
+  updateEnemies(dt);
+  updateBoss(dt);
+  checkCollectibles();
+
+  // update player flash & attack timers handled in handlePlayerInput
+  if(player.flash > 0) player.flash--;
+
+  // camera also clamps
+  clampCamera();
+
+  // draw
+  drawAll();
+
+  requestAnimationFrame(gameLoop);
+}
+
+/* ============================================================
+   Drawing everything
+   ============================================================ */
+function drawAll(){
+  // clear
+  ctx.fillStyle = '#0a0a0d';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // parallax background (repeat)
+  const bg = images['bg'];
+  if(bg.complete){
+    const bx = -camera.x*0.2 % bg.width;
+    for(let i=-1; i<6; i++){
+      ctx.drawImage(bg, bx + i * bg.width, -200 - camera.y*0.08, bg.width, canvas.height+400);
+    }
+  }
+
+  // draw platforms (tiled ground image)
+  const ground = images['g'];
+  for(const p of platforms){
+    // draw tiling for p.w
+    const tileW = 64;
+    for(let tx = 0; tx < p.w; tx += tileW){
+      ctx.drawImage(ground, p.x + tx - camera.x, p.y - camera.y, Math.min(tileW, p.w - tx), p.h);
+    }
+  }
+
+  // spikes
+  const spikeImg = images['stug'];
+  for(const s of spikes){
+    ctx.drawImage(spikeImg, s.x - camera.x, s.y - camera.y, s.w, s.h);
+  }
+
+  // collectibles
+  for(const c of collectibles){
+    if(c.picked) continue;
+    // draw a colored placeholder box with label (or use an image if you have)
+    ctx.fillStyle = '#f7f7b2';
+    ctx.fillRect(c.x - camera.x, c.y - camera.y, 36, 36);
+    ctx.fillStyle = '#000';
+    ctx.font = '11px Arial';
+    ctx.fillText(c.type.split(' ')[0], c.x - camera.x + 2, c.y - camera.y + 22);
+  }
+
+  // enemies
+  for(const e of enemies){
+    ctx.drawImage(images['cheese'], e.x - camera.x, e.y - camera.y, e.w, e.h);
+    // small hp bar
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(e.x - camera.x, e.y - 6 - camera.y, e.w, 6);
+    ctx.fillStyle = 'lime';
+    ctx.fillRect(e.x - camera.x, e.y - 6 - camera.y, e.w * Math.max(0, e.hp/2), 6);
+  }
+
+  // boss
+  if(boss.active && boss.state !== 'dead'){
+    ctx.save();
+    if(boss.teleTimer && boss.teleTimer%6<3){
+      // flash telegraph
+      ctx.globalAlpha = 0.5 + Math.random()*0.5;
+    }
+    ctx.drawImage(images['supercheese'], boss.x - camera.x, boss.y - camera.y, boss.w, boss.h);
+    // HP bar
+    ctx.restore();
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(canvas.width/2 - 220, 14, 440, 18);
+    ctx.fillStyle = 'crimson';
+    const hpFrac = Math.max(0, boss.hp / boss.maxHp);
+    ctx.fillRect(canvas.width/2 - 220, 14, 440 * hpFrac, 18);
+    ctx.strokeStyle = '#fff'; ctx.strokeRect(canvas.width/2 - 220, 14, 440, 18);
+  }
+
+  // fireballs
+  for(const b of fireballs){
+    ctx.drawImage(images['BALL'], b.x - camera.x, b.y - camera.y, b.w, b.h);
+  }
+
+  // gas aura
+  if(gasAura.active){
+    ctx.fillStyle = 'rgba(120,255,120,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(player.x + player.w/2 - camera.x, player.y + player.h/2 - camera.y, 180, 80, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // player (flash on hit)
+  if(player.flash % 6 < 3) ctx.globalAlpha = 0.6;
+  if(player.attacking){
+    ctx.drawImage(images['chirka'], player.x - camera.x, player.y - camera.y, player.w, player.h);
+  } else {
+    ctx.drawImage(images['chirk'], player.x - camera.x, player.y - camera.y, player.w, player.h);
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  hudHp.innerText = `HP: ${player.hp}/${player.maxHp}`;
+  // inventory display
+  renderInventory();
+
+  // minimap rendering
+  if(showMap){ drawMap(); }
+}
+
+/* ============================================================
+   Inventory UI rendering
+   ============================================================ */
+function renderInventory(){
+  let html = '<div style="font-size:14px; font-weight:bold; margin-bottom:6px;">Inventory</div>';
+  for(const key in inventory){
+    html += `<div style="font-size:13px">${key}: ${inventory[key].count || 0}</div>`;
+  }
+  inventoryDiv.innerHTML = html;
+}
+
+/* ============================================================
+   Small map drawing (player, enemies, collectibles, boss)
+   ============================================================ */
+function drawMap(){
+  // clear
+  mapCtx.clearRect(0,0,mapCanvas.width,mapCanvas.height);
+  mapCtx.fillStyle = 'rgba(20,20,30,0.9)';
+  mapCtx.fillRect(0,0,mapCanvas.width,mapCanvas.height);
+
+  // draw level bounds outline
+  mapCtx.strokeStyle = '#666'; mapCtx.strokeRect(2,2,mapCanvas.width-4, mapCanvas.height-4);
+
+  // scale factors
+  const sx = mapCanvas.width / LEVEL.width;
+  const sy = mapCanvas.height / LEVEL.height;
+
+  // collectibles
+  for(const c of collectibles){
+    if(c.picked) continue;
+    mapCtx.fillStyle = 'gold';
+    mapCtx.fillRect(c.x*sx - 2, c.y*sy - 2, 4,4);
+  }
+  // enemies (clustered)
+  mapCtx.fillStyle = 'red';
+  for(const e of enemies){
+    mapCtx.fillRect(e.x*sx - 1, e.y*sy - 1, 2,2);
+  }
+  // boss
+  if(boss.active){
+    mapCtx.fillStyle = 'purple';
+    mapCtx.fillRect(boss.x*sx - 3, boss.y*sy - 3, 6, 6);
+  } else {
+    mapCtx.fillStyle = 'rgba(128,0,128,0.4)';
+    mapCtx.fillRect(boss.x*sx - 3, boss.y*sy - 3, 6, 6);
+  }
+
+  // player
+  mapCtx.fillStyle = 'lime';
+  mapCtx.fillRect(player.x*sx - 2, player.y*sy - 2, 4, 4);
+
+  // camera rect
+  mapCtx.strokeStyle = 'rgba(255,255,255,0.4)';
+  mapCtx.strokeRect(camera.x*sx, camera.y*sy, canvas.width*sx, canvas.height*sy);
+}
+
+/* ============================================================
+   Utilities and start
+   ============================================================ */
+// Bind UI (pause overlay)
+document.addEventListener('visibilitychange', ()=> {
+  if(document.hidden && running && !paused) { togglePause(); }
+});
+
+// Allow clicking on canvas to focus / resume audio on some browsers
+canvas.addEventListener('click', ()=> {
+  if(!running) startGame();
+});
+
+// Start the game automatically if user pressed start — done through menu button
+
+// initial map canvas sizing & position
+function resizeMapCanvas(){
+  mapCanvas.width = 240; mapCanvas.height = 160;
+  mapCanvas.style.right = '12px';
+  mapCanvas.style.bottom = '12px';
+}
+resizeMapCanvas();
+
+/* ============================================================
+   Start: nothing auto-starts until player clicks START
+   (menu button calls startGame())
+   ============================================================ */
+</script>
+</body>
+</html>
